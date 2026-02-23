@@ -1,4 +1,4 @@
-"""Benchmark runner — measures MemShield detection rates against tiered datasets.
+"""Benchmark runner — compares validation strategies against tiered datasets.
 
 Tiers:
   1 — Existing prompt injection datasets (broad baseline)
@@ -6,33 +6,31 @@ Tiers:
   3 — Adversarial paired entries (subtle, hard to detect)
 
 Usage:
-    # Dry run (print dataset, no LLM calls):
-    python benchmarks/run_benchmark.py --dry-run --tier 2
-    python benchmarks/run_benchmark.py --dry-run --tier 1 2 3
+    # Heuristic only (no LLM needed — runs instantly):
+    python benchmarks/run_benchmark.py --strategy heuristic --tier 2 3
 
-    # Run against cloud LLM:
-    OPENAI_API_KEY=sk-... python benchmarks/run_benchmark.py --tier 2 3
-
-    # Run against local Ollama:
-    python benchmarks/run_benchmark.py --tier 2 3 \
+    # Consensus with local Ollama:
+    python benchmarks/run_benchmark.py --strategy consensus \
         --local-url http://localhost:11434/v1 --local-model llama3.1:8b
 
-    # Run via claude-relay (any OpenAI-compatible endpoint works):
-    python benchmarks/run_benchmark.py --tier 2 3 \
-        --local-url http://localhost:8082/v1 --local-model sonnet
+    # Consensus with cloud:
+    OPENAI_API_KEY=sk-... python benchmarks/run_benchmark.py --strategy consensus
 
-    # Run all tiers with both local and cloud (full comparison):
-    python benchmarks/run_benchmark.py --tier 1 2 3 \
+    # Ensemble (heuristic + consensus):
+    python benchmarks/run_benchmark.py --strategy ensemble \
+        --local-url http://localhost:11434/v1 --local-model llama3.1:8b
+
+    # Compare ALL strategies head-to-head:
+    python benchmarks/run_benchmark.py --compare-strategies \
         --local-url http://localhost:11434/v1 --local-model llama3.1:8b \
-        --cloud-model gpt-4o --compare
-
-    # Compare claude-relay vs direct OpenAI:
-    python benchmarks/run_benchmark.py --tier 2 3 --compare \
-        --local-url http://localhost:8082/v1 --local-model sonnet \
         --cloud-model gpt-4o
 
-    # Limit tier 1 size (it can be large):
-    python benchmarks/run_benchmark.py --tier 1 2 3 --max-tier1 200
+    # Via claude-relay:
+    python benchmarks/run_benchmark.py --strategy consensus \
+        --local-url http://localhost:8082/v1 --local-model sonnet
+
+    # Dry run:
+    python benchmarks/run_benchmark.py --dry-run --tier 2 3
 """
 from __future__ import annotations
 
@@ -43,13 +41,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Add src to path so we can import memshield
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-# Add benchmarks dir for local imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memshield._types import Verdict
-from memshield.validation import build_validation_prompt, parse_validation_response
+from memshield._types import ValidationStrategy, Verdict
 from dataset import BenchmarkEntry
 from loaders import load_all_tiers, get_tier_stats
 
@@ -57,7 +52,7 @@ from loaders import load_all_tiers, get_tier_stats
 @dataclass
 class BenchmarkResult:
     """Aggregated results from a benchmark run."""
-    model_name: str = ""
+    strategy_name: str = ""
     tier_label: str = ""
     total: int = 0
     true_positives: int = 0
@@ -96,7 +91,7 @@ class BenchmarkResult:
 
     def to_dict(self) -> dict:
         return {
-            "model": self.model_name,
+            "strategy": self.strategy_name,
             "tier": self.tier_label,
             "total": self.total,
             "true_positives": self.true_positives,
@@ -116,22 +111,20 @@ class BenchmarkResult:
 
 
 def run_benchmark(
-    provider: object,
+    strategy: ValidationStrategy,
     entries: list[BenchmarkEntry],
-    model_name: str = "",
     tier_label: str = "",
     quiet: bool = False,
 ) -> BenchmarkResult:
-    """Run benchmark against a labeled dataset."""
-    result = BenchmarkResult(model_name=model_name, tier_label=tier_label)
+    """Run benchmark using a validation strategy against a labeled dataset."""
+    result = BenchmarkResult(strategy_name=strategy.name, tier_label=tier_label)
 
     for i, entry in enumerate(entries):
         result.total += 1
-        prompt = build_validation_prompt(entry.content)
 
         start = time.monotonic()
         try:
-            response = provider.generate(prompt, temperature=0.0)  # type: ignore[union-attr]
+            validation = strategy.validate(entry.content)
         except Exception as e:
             if not quiet:
                 print(f"  [{i+1:3d}/{len(entries)}] ERROR: {e}")
@@ -139,8 +132,6 @@ def run_benchmark(
             continue
         elapsed_ms = (time.monotonic() - start) * 1000
         result.latencies_ms.append(elapsed_ms)
-
-        validation = parse_validation_response(response)
 
         # Classify
         if entry.is_poisoned:
@@ -181,7 +172,7 @@ def run_benchmark(
             print(
                 f"  [{i+1:3d}/{len(entries)}] {label:3s} | "
                 f"truth={status:8s} | verdict={validation.verdict.value:9s} | "
-                f"conf={validation.confidence:.2f} | {elapsed_ms:7.0f}ms | "
+                f"conf={validation.confidence:.2f} | {elapsed_ms:7.1f}ms | "
                 f"{entry.content[:55]}..."
             )
 
@@ -189,8 +180,8 @@ def run_benchmark(
 
 
 def print_results(result: BenchmarkResult) -> None:
-    """Print formatted results."""
-    header = f"RESULTS: {result.model_name}"
+    """Print formatted results for a single strategy."""
+    header = f"RESULTS: {result.strategy_name}"
     if result.tier_label:
         header += f" ({result.tier_label})"
 
@@ -209,7 +200,7 @@ def print_results(result: BenchmarkResult) -> None:
     print(f"Recall:             {result.recall:.1%}")
     print(f"F1 Score:           {result.f1:.1%}")
     print(f"False Positive Rate:{result.false_positive_rate:.1%}")
-    print(f"Mean Latency:       {result.mean_latency_ms:.0f}ms")
+    print(f"Mean Latency:       {result.mean_latency_ms:.1f}ms")
 
     if result.per_category:
         print()
@@ -222,47 +213,117 @@ def print_results(result: BenchmarkResult) -> None:
                 f"{c.get('tn',0):4d} {c.get('fn',0):4d} {c.get('amb',0):4d}"
             )
 
-    if result.per_source:
-        print()
-        print("Per-source:")
-        print(f"  {'Source':<35s} {'TP':>4s} {'FP':>4s} {'TN':>4s} {'FN':>4s} {'AMB':>4s}")
-        print(f"  {'-'*35} {'--':>4s} {'--':>4s} {'--':>4s} {'--':>4s} {'---':>4s}")
-        for src, c in sorted(result.per_source.items()):
-            print(
-                f"  {src:<35s} {c.get('tp',0):4d} {c.get('fp',0):4d} "
-                f"{c.get('tn',0):4d} {c.get('fn',0):4d} {c.get('amb',0):4d}"
-            )
-
 
 def print_comparison(results: list[BenchmarkResult]) -> None:
-    """Print side-by-side comparison of multiple model runs."""
-    print("\n" + "=" * 70)
-    print("MODEL COMPARISON")
-    print("=" * 70)
-    print(f"  {'Model':<25s} {'Prec':>7s} {'Recall':>7s} {'F1':>7s} {'FPR':>7s} {'Latency':>9s}")
-    print(f"  {'-'*25} {'-----':>7s} {'------':>7s} {'--':>7s} {'---':>7s} {'-------':>9s}")
+    """Print side-by-side comparison table."""
+    print("\n" + "=" * 80)
+    print("STRATEGY COMPARISON")
+    print("=" * 80)
+    print(f"  {'Strategy':<35s} {'Prec':>7s} {'Recall':>7s} {'F1':>7s} {'FPR':>7s} {'AMB':>5s} {'Latency':>9s}")
+    print(f"  {'-'*35} {'-----':>7s} {'------':>7s} {'--':>7s} {'---':>7s} {'---':>5s} {'-------':>9s}")
     for r in results:
-        label = r.model_name
-        if r.tier_label:
-            label += f" [{r.tier_label}]"
+        label = r.strategy_name
+        if len(label) > 35:
+            label = label[:32] + "..."
         print(
-            f"  {label:<25s} {r.precision:6.1%} {r.recall:6.1%} "
-            f"{r.f1:6.1%} {r.false_positive_rate:6.1%} {r.mean_latency_ms:7.0f}ms"
+            f"  {label:<35s} {r.precision:6.1%} {r.recall:6.1%} "
+            f"{r.f1:6.1%} {r.false_positive_rate:6.1%} {r.ambiguous:5d} {r.mean_latency_ms:7.1f}ms"
         )
+    print()
+    # Highlight the winner
+    by_f1 = sorted(results, key=lambda r: r.f1, reverse=True)
+    print(f"  Best F1: {by_f1[0].strategy_name} ({by_f1[0].f1:.1%})")
+    by_recall = sorted(results, key=lambda r: r.recall, reverse=True)
+    print(f"  Best recall: {by_recall[0].strategy_name} ({by_recall[0].recall:.1%})")
+    by_fpr = sorted(results, key=lambda r: r.false_positive_rate)
+    print(f"  Lowest FPR: {by_fpr[0].strategy_name} ({by_fpr[0].false_positive_rate:.1%})")
+    by_speed = sorted(results, key=lambda r: r.mean_latency_ms)
+    print(f"  Fastest: {by_speed[0].strategy_name} ({by_speed[0].mean_latency_ms:.1f}ms)")
+
+
+def build_strategies(args: argparse.Namespace) -> list[tuple[str, object]]:
+    """Build the list of strategies to benchmark based on CLI args."""
+    from memshield.strategies import ConsensusStrategy, EnsembleStrategy, KeywordHeuristicStrategy
+    from memshield.adapters.openai_provider import OpenAIProvider
+
+    strategies: list[tuple[str, object]] = []
+    heuristic = KeywordHeuristicStrategy()
+
+    local_provider = None
+    if args.local_url:
+        local_provider = OpenAIProvider(
+            model=args.local_model,
+            base_url=args.local_url,
+            api_key="not-needed",
+        )
+
+    cloud_provider = None
+    if not args.local_url or args.compare_strategies:
+        # Use cloud if no local, or if comparing all strategies
+        cloud_provider = OpenAIProvider(model=args.cloud_model)
+
+    if args.compare_strategies:
+        # Run all available strategies
+        strategies.append(("heuristic", heuristic))
+        if local_provider:
+            local_consensus = ConsensusStrategy(local_provider)
+            strategies.append(("consensus_local", local_consensus))
+            strategies.append(("ensemble_majority", EnsembleStrategy([heuristic, local_consensus], mode="majority")))
+            strategies.append(("ensemble_any", EnsembleStrategy([heuristic, local_consensus], mode="any_poisoned")))
+        if cloud_provider:
+            cloud_consensus = ConsensusStrategy(cloud_provider)
+            strategies.append(("consensus_cloud", cloud_consensus))
+            if local_provider:
+                local_consensus = ConsensusStrategy(local_provider)
+                strategies.append(("ensemble_full", EnsembleStrategy([heuristic, local_consensus, cloud_consensus], mode="majority")))
+    else:
+        # Single strategy mode
+        if args.strategy == "heuristic":
+            strategies.append(("heuristic", heuristic))
+        elif args.strategy == "consensus":
+            provider = local_provider or cloud_provider
+            if provider is None:
+                print("ERROR: consensus strategy requires --local-url or OPENAI_API_KEY")
+                sys.exit(1)
+            strategies.append(("consensus", ConsensusStrategy(provider)))
+        elif args.strategy == "ensemble":
+            provider = local_provider or cloud_provider
+            if provider is None:
+                print("ERROR: ensemble strategy requires --local-url or OPENAI_API_KEY")
+                sys.exit(1)
+            consensus = ConsensusStrategy(provider)
+            mode = args.ensemble_mode
+            strategies.append((f"ensemble_{mode}", EnsembleStrategy([heuristic, consensus], mode=mode)))
+
+    return strategies
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run MemShield benchmark",
+        description="Benchmark MemShield validation strategies",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python benchmarks/run_benchmark.py --dry-run --tier 2
-  python benchmarks/run_benchmark.py --tier 2 3 --cloud-model gpt-4o
-  python benchmarks/run_benchmark.py --tier 1 2 3 --local-url http://localhost:11434/v1
-  python benchmarks/run_benchmark.py --tier 2 --compare --local-url http://localhost:11434/v1 --cloud-model gpt-4o
+  # Heuristic baseline (instant, no LLM):
+  python benchmarks/run_benchmark.py --strategy heuristic --tier 2 3
+
+  # Compare all strategies head-to-head:
+  python benchmarks/run_benchmark.py --compare-strategies \\
+      --local-url http://localhost:11434/v1 --local-model llama3.1:8b \\
+      --cloud-model gpt-4o
+
+  # Single strategy via claude-relay:
+  python benchmarks/run_benchmark.py --strategy consensus \\
+      --local-url http://localhost:8082/v1 --local-model sonnet
         """,
     )
+    parser.add_argument("--strategy", choices=["heuristic", "consensus", "ensemble"],
+                        default="heuristic",
+                        help="Strategy to benchmark (default: heuristic)")
+    parser.add_argument("--ensemble-mode", choices=["majority", "any_poisoned"],
+                        default="majority", help="Ensemble aggregation mode (default: majority)")
+    parser.add_argument("--compare-strategies", action="store_true",
+                        help="Run all available strategies and compare results")
     parser.add_argument("--tier", nargs="+", type=int, default=[2, 3],
                         help="Which tiers to run (default: 2 3)")
     parser.add_argument("--max-tier1", type=int, default=500,
@@ -273,12 +334,8 @@ Examples:
                         help="Local model name (default: llama3.1:8b)")
     parser.add_argument("--cloud-model", default="gpt-4o",
                         help="Cloud model name (default: gpt-4o)")
-    parser.add_argument("--cloud-only", action="store_true",
-                        help="Use cloud model only")
-    parser.add_argument("--compare", action="store_true",
-                        help="Run both local and cloud, print comparison")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Print dataset without running LLM")
+                        help="Print dataset without running strategies")
     parser.add_argument("--quiet", action="store_true",
                         help="Only print summary, not per-entry results")
     args = parser.parse_args()
@@ -303,63 +360,21 @@ Examples:
         print(f"\nTotal: {len(entries)} entries")
         return
 
-    from memshield.adapters.openai_provider import OpenAIProvider
-
+    # Build and run strategies
+    strategies = build_strategies(args)
     tier_label = f"tier {'+'.join(str(t) for t in args.tier)}"
     all_results: list[BenchmarkResult] = []
 
-    if args.compare and args.local_url:
-        # Run both local and cloud
-        print(f"--- Local model: {args.local_model} at {args.local_url} ---")
-        local_provider = OpenAIProvider(
-            model=args.local_model,
-            base_url=args.local_url,
-            api_key="not-needed",
-        )
-        local_result = run_benchmark(
-            local_provider, entries,
-            model_name=args.local_model,
-            tier_label=tier_label,
-            quiet=args.quiet,
-        )
-        print_results(local_result)
-        all_results.append(local_result)
-
-        print(f"\n--- Cloud model: {args.cloud_model} ---")
-        cloud_provider = OpenAIProvider(model=args.cloud_model)
-        cloud_result = run_benchmark(
-            cloud_provider, entries,
-            model_name=args.cloud_model,
-            tier_label=tier_label,
-            quiet=args.quiet,
-        )
-        print_results(cloud_result)
-        all_results.append(cloud_result)
-
-        print_comparison(all_results)
-    else:
-        # Single model run
-        if args.local_url and not args.cloud_only:
-            model_name = args.local_model
-            provider = OpenAIProvider(
-                model=args.local_model,
-                base_url=args.local_url,
-                api_key="not-needed",
-            )
-        else:
-            model_name = args.cloud_model
-            provider = OpenAIProvider(model=args.cloud_model)
-
-        print(f"Model: {model_name}")
-        print()
-        result = run_benchmark(
-            provider, entries,
-            model_name=model_name,
-            tier_label=tier_label,
-            quiet=args.quiet,
-        )
+    for name, strategy in strategies:
+        print(f"\n{'='*70}")
+        print(f"Running: {strategy.name}")
+        print(f"{'='*70}")
+        result = run_benchmark(strategy, entries, tier_label=tier_label, quiet=args.quiet)
         print_results(result)
         all_results.append(result)
+
+    if len(all_results) > 1:
+        print_comparison(all_results)
 
     # Save results
     output = [r.to_dict() for r in all_results]

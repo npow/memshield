@@ -395,6 +395,12 @@ def load_all_tiers(
     Args:
         tiers: Which tiers to load (default: all). E.g., [1, 2] for tier 1 and 2.
         max_tier1_per_dataset: Max entries per external dataset in tier 1.
+
+    Tiers:
+        1 — Existing prompt injection datasets (HuggingFace)
+        2 — Memory-specific hand-crafted entries
+        3 — Adversarial paired entries (subtle)
+        4 — AgentPoison reconstructed data (StrategyQA + EHR, NeurIPS 2024)
     """
     if tiers is None:
         tiers = [1, 2, 3]
@@ -422,6 +428,22 @@ def load_all_tiers(
         poisoned = sum(1 for e in t3 if e.is_poisoned)
         print(f"  Tier 3 total: {len(t3)} entries ({clean} clean, {poisoned} poisoned)")
         entries.extend(t3)
+
+    if 4 in tiers:
+        print("Loading Tier 4: AgentPoison reconstructed data (NeurIPS 2024)...")
+        try:
+            from agentpoison_loader import load_agentpoison_dataset
+            t4 = load_agentpoison_dataset()
+            clean = sum(1 for e in t4 if not e.is_poisoned)
+            poisoned = sum(1 for e in t4 if e.is_poisoned)
+            print(f"  Tier 4 total: {len(t4)} entries ({clean} clean, {poisoned} poisoned)")
+            entries.extend(t4)
+        except FileNotFoundError as e:
+            print(f"  WARNING: {e}")
+            print("  Skipping Tier 4.")
+        except Exception as e:
+            logger.warning("Failed to load AgentPoison data: %s", e)
+            print(f"  WARNING: Could not load AgentPoison data: {e}")
 
     return entries
 

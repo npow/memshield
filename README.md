@@ -215,24 +215,55 @@ pip install -e ".[dev]"
 pytest -v
 ```
 
+### Pluggable strategies
+
+memshield ships with multiple validation strategies you can use individually or ensemble:
+
+```python
+from memshield import (
+    MemShield, ConsensusStrategy, KeywordHeuristicStrategy, EnsembleStrategy
+)
+from memshield.adapters.openai_provider import OpenAIProvider
+
+# Fast keyword heuristic (instant, zero cost, catches obvious attacks)
+shield = MemShield(strategy=KeywordHeuristicStrategy())
+
+# LLM consensus — A-MemGuard approach (deep, catches subtle attacks)
+provider = OpenAIProvider(model="llama3.1:8b", base_url="http://localhost:11434/v1")
+shield = MemShield(strategy=ConsensusStrategy(provider))
+
+# Ensemble — run both, flag as poisoned if either detects it
+shield = MemShield(strategy=EnsembleStrategy(
+    [KeywordHeuristicStrategy(), ConsensusStrategy(provider)],
+    mode="any_poisoned",  # or "majority" for balanced precision/recall
+))
+```
+
 ### Run benchmarks
 
+The benchmark compares strategies against labeled datasets including reconstructed [AgentPoison](https://github.com/AI-secure/AgentPoison) (NeurIPS 2024) attack data — the same corpus A-MemGuard evaluated against.
+
 ```bash
-# Dry run (see the dataset, no LLM calls)
-python benchmarks/run_benchmark.py --dry-run --tier 2 3
+# Heuristic baseline (instant, no LLM needed):
+python benchmarks/run_benchmark.py --strategy heuristic --tier 2 3 4
 
-# Against a local Ollama instance
-python benchmarks/run_benchmark.py --tier 2 3 \
-    --local-url http://localhost:11434/v1 --local-model llama3.1:8b
-
-# Against OpenAI
-OPENAI_API_KEY=sk-... python benchmarks/run_benchmark.py --tier 2 3
-
-# Compare local vs cloud
-python benchmarks/run_benchmark.py --tier 2 3 --compare \
+# Compare all strategies head-to-head:
+python benchmarks/run_benchmark.py --compare-strategies --tier 2 3 4 \
     --local-url http://localhost:11434/v1 --local-model llama3.1:8b \
     --cloud-model gpt-4o
+
+# Via claude-relay:
+python benchmarks/run_benchmark.py --compare-strategies --tier 2 3 4 \
+    --local-url http://localhost:8082/v1 --local-model sonnet
 ```
+
+Benchmark tiers:
+
+| Tier | Source | Entries | What it tests |
+|------|--------|---------|---------------|
+| 2 | Hand-crafted + MemoryGraft-style | 55 | Memory-specific: experience records, schema spoofing, rubric mimicry |
+| 3 | Adversarial paired entries | 18 | Subtle pairs where clean and poisoned look structurally identical |
+| 4 | AgentPoison (NeurIPS 2024) | 330 | Reconstructed StrategyQA + EHR poisoned passages with published golden triggers |
 
 ## License
 
