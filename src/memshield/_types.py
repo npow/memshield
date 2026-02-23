@@ -97,6 +97,20 @@ class LLMProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class ValidationStrategy(Protocol):
+    """A pluggable strategy for validating memory entries."""
+
+    def validate(self, content: str) -> ValidationResult:
+        """Validate a single memory entry. Returns a ValidationResult."""
+        ...
+
+    @property
+    def name(self) -> str:
+        """Human-readable name of this strategy."""
+        ...
+
+
 @dataclass(frozen=True)
 class DriftAlert:
     """Alert generated when memory access patterns deviate from baseline."""

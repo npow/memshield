@@ -8,18 +8,28 @@ from memshield._types import (
     ShieldConfig,
     TrustLevel,
     ValidationResult,
+    ValidationStrategy,
     Verdict,
+)
+from memshield.strategies import (
+    ConsensusStrategy,
+    EnsembleStrategy,
+    KeywordHeuristicStrategy,
 )
 
 __all__ = [
+    "ConsensusStrategy",
     "DriftAlert",
+    "EnsembleStrategy",
     "FailurePolicy",
+    "KeywordHeuristicStrategy",
     "LLMProvider",
     "MemShield",
     "ProvenanceRecord",
     "ShieldConfig",
     "TrustLevel",
     "ValidationResult",
+    "ValidationStrategy",
     "Verdict",
 ]
 
