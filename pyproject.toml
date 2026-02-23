@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "memshield"
+version = "0.1.0"
+description = "Production-grade memory integrity defense for AI agents"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+openai = ["openai>=1.0"]
+chroma = ["chromadb>=0.5"]
+langchain = ["langchain-core>=0.3"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+]
+all = [
+    "memshield[openai,chroma,langchain,dev]",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/memshield"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests that require external services",
+]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.10"
