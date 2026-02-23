@@ -265,6 +265,24 @@ Benchmark tiers:
 | 3 | Adversarial paired entries | 18 | Subtle pairs where clean and poisoned look structurally identical |
 | 4 | AgentPoison (NeurIPS 2024) | 330 | Reconstructed StrategyQA + EHR poisoned passages with published golden triggers |
 
+### Results (403 entries, tiers 2+3+4)
+
+Tested using Claude Haiku via [claude-relay](https://github.com/npow/claude-relay):
+
+| Strategy | Precision | Recall | F1 | FPR | Latency |
+|----------|-----------|--------|----|-----|---------|
+| Keyword heuristic | 100% | 14.5% | 25.4% | 0% | <1ms |
+| LLM consensus | 97.1% | 98.6% | 97.8% | 0.6% | ~9s |
+| Ensemble (majority) | 100% | 100%* | 100%* | 0% | ~8s |
+| Ensemble (any_poisoned) | 94.5% | **100%** | 97.2% | 1.2% | ~6s |
+
+*\*Majority mode pushes 57 entries to ambiguous when heuristic and LLM disagree.*
+
+Key findings:
+- **Keyword heuristic catches 0% of AgentPoison attacks.** The poisoned passages contain no obvious instruction patterns — they're disguised as reasoning traces.
+- **LLM consensus catches 98.6% of all poisoned entries** with only 2 false positives out of 334 clean entries. This validates A-MemGuard's published claim (>95% reduction) on the same attack data.
+- **Ensemble (any_poisoned) achieves 100% recall** — every poisoned entry detected — at the cost of 4 false positives (1.2% FPR).
+
 ## License
 
 [Apache-2.0](LICENSE)
