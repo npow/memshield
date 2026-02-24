@@ -1,0 +1,96 @@
+{
+  "T1_instruction_override": {
+    "name": "Instruction Override",
+    "description": "Direct instructions to override agent behavior",
+    "sources": [
+      "BIPIA",
+      "deepset"
+    ],
+    "owasp": "ASI06",
+    "mitre": "AML.T0080"
+  },
+  "T2_data_exfiltration": {
+    "name": "Data Exfiltration",
+    "description": "Instructions to send data to external endpoints",
+    "sources": [
+      "Microsoft advisory",
+      "MITRE ATLAS"
+    ],
+    "owasp": "ASI06",
+    "mitre": "AML.T0080"
+  },
+  "T3_behavioral_drift": {
+    "name": "Behavioral Drift",
+    "description": "Subtle changes to agent behavior over time",
+    "sources": [
+      "MemoryGraft"
+    ],
+    "owasp": "ASI06",
+    "mitre": "AML.T0080"
+  },
+  "T4_factual_manipulation": {
+    "name": "Factual Manipulation",
+    "description": "False information disguised as corrections or updates",
+    "sources": [
+      "PoisonedRAG",
+      "Microsoft advisory"
+    ],
+    "owasp": "ASI06",
+    "mitre": "AML.T0080"
+  },
+  "T5_backdoor_trigger": {
+    "name": "Backdoor Trigger",
+    "description": "Embedded triggers that activate on specific inputs",
+    "sources": [
+      "AgentPoison"
+    ],
+    "owasp": "ASI06",
+    "mitre": "AML.T0080"
+  },
+  "T6_experience_poisoning": {
+    "name": "Experience Poisoning",
+    "description": "Malicious procedures disguised as successful task records",
+    "sources": [
+      "MemoryGraft",
+      "MINJA"
+    ],
+    "owasp": "ASI06",
+    "mitre": "AML.T0080"
+  },
+  "T7_recommendation_poisoning": {
+    "name": "Recommendation Poisoning",
+    "description": "Product or service recommendations disguised as evaluations",
+    "sources": [
+      "Microsoft advisory"
+    ],
+    "owasp": "ASI06",
+    "mitre": "AML.T0080"
+  },
+  "T8_configuration_poisoning": {
+    "name": "Configuration Poisoning",
+    "description": "Agent configuration or policy overrides",
+    "sources": [
+      "MITRE ATLAS"
+    ],
+    "owasp": "ASI06",
+    "mitre": "AML.T0080"
+  },
+  "T9_security_degradation": {
+    "name": "Security Degradation",
+    "description": "Advice that weakens security posture",
+    "sources": [
+      "Original"
+    ],
+    "owasp": "ASI06",
+    "mitre": "AML.T0080"
+  },
+  "T10_c2_persistence": {
+    "name": "C2 / Persistence",
+    "description": "External callbacks, data collection, persistent access",
+    "sources": [
+      "ZombieAgent"
+    ],
+    "owasp": "ASI06",
+    "mitre": "AML.T0080"
+  }
+}

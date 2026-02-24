@@ -1,0 +1,91 @@
+{
+  "name": "memshield-bench",
+  "version": "1.0.0",
+  "description": "Labeled benchmark dataset for AI agent memory poisoning detection",
+  "total_entries": 1178,
+  "clean_entries": 856,
+  "poisoned_entries": 322,
+  "splits": {
+    "train": 824,
+    "validation": 177,
+    "test": 177
+  },
+  "attack_types": {
+    "T5_backdoor_trigger": 150,
+    "T3_behavioral_drift": 18,
+    "T9_security_degradation": 24,
+    "T2_data_exfiltration": 18,
+    "T7_recommendation_poisoning": 15,
+    "T4_factual_manipulation": 23,
+    "T1_instruction_override": 25,
+    "T10_c2_persistence": 17,
+    "T8_configuration_poisoning": 17,
+    "T6_experience_poisoning": 15
+  },
+  "domains": {
+    "general_knowledge": {
+      "clean": 525,
+      "poisoned": 100
+    },
+    "healthcare": {
+      "clean": 210,
+      "poisoned": 51
+    },
+    "software_development": {
+      "clean": 87,
+      "poisoned": 92
+    },
+    "operations": {
+      "clean": 19,
+      "poisoned": 54
+    },
+    "security": {
+      "clean": 2,
+      "poisoned": 2
+    },
+    "customer_service": {
+      "clean": 13,
+      "poisoned": 3
+    },
+    "general": {
+      "clean": 0,
+      "poisoned": 20
+    }
+  },
+  "difficulty_distribution": {
+    "easy": {
+      "clean": 853,
+      "poisoned": 8
+    },
+    "medium": {
+      "clean": 3,
+      "poisoned": 9
+    },
+    "hard": {
+      "clean": 0,
+      "poisoned": 305
+    }
+  },
+  "sources": [
+    "domain_customer_service",
+    "bulk_t10",
+    "instruction_overrides",
+    "domain_general",
+    "agentpoison_ehr",
+    "bulk_t2",
+    "bulk_t6",
+    "memorygraft_style",
+    "adversarial_pairs",
+    "domain_operations",
+    "microsoft_advisory_style",
+    "domain_healthcare",
+    "bulk_t4",
+    "bulk_t3",
+    "memorygraft_rubric",
+    "bulk_clean",
+    "bulk_t8",
+    "agentpoison_strategyqa"
+  ],
+  "license": "CC-BY-SA-4.0",
+  "citation": "memshield-bench: A Benchmark Dataset for AI Agent Memory Poisoning Detection"
+}
