@@ -1,8 +1,9 @@
 """Main MemShield class — orchestrates all defense layers."""
 from __future__ import annotations
 
+import hashlib
 import logging
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from memshield._internal.drift import DriftDetector
 from memshield._types import (
@@ -16,6 +17,11 @@ from memshield._types import (
 )
 from memshield.provenance import ProvenanceTracker
 from memshield.proxy import VectorStoreProxy
+
+if TYPE_CHECKING:
+    from memshield.audit.config import AuditConfig
+    from memshield.audit.log import AuditLog
+    from memshield.audit.schema import AuditRecord
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +45,18 @@ class MemShield:
         local_provider: LLMProvider | None = None,
         cloud_provider: LLMProvider | None = None,
         config: ShieldConfig | None = None,
+        audit: AuditConfig | None = None,
     ) -> None:
         self._config = config or ShieldConfig()
         self._provenance = ProvenanceTracker()
         self._drift = DriftDetector()
         self._stats = _ShieldStats()
+
+        if audit is not None:
+            from memshield.audit.log import AuditLog as _AuditLog
+            self._audit_log: AuditLog | None = _AuditLog(audit)
+        else:
+            self._audit_log = None
 
         # Build strategy from providers if no explicit strategy given
         if strategy is not None:
@@ -62,6 +75,11 @@ class MemShield:
         # (e.g., EnsembleStrategy runs multiple approaches internally)
         if strategy is not None:
             self._cloud_strategy = None
+
+    @property
+    def audit_log(self) -> "AuditLog | None":
+        """The audit log, or None if audit is not configured."""
+        return self._audit_log
 
     @property
     def config(self) -> ShieldConfig:
@@ -144,6 +162,140 @@ class MemShield:
                     validated.append(doc)
 
         return validated
+
+    def validate_reads_with_audit(
+        self,
+        documents: list[Any],
+        *,
+        query: str,
+        user_id: str | None = None,
+        inference_id: str | None = None,
+        score_map: dict[int, float] | None = None,
+    ) -> "tuple[list[Any], AuditRecord | None]":
+        """Validate documents and write an audit record if audit is configured.
+
+        Returns (clean_docs, audit_record). audit_record is None if audit not configured.
+        """
+        clean_docs: list[Any] = []
+        retrieved_audit: list[dict] = []
+        blocked_audit: list[dict] = []
+
+        for doc in documents:
+            content = self._extract_content(doc)
+            category = self._extract_category(doc)
+
+            # Record access for drift detection
+            if self._config.enable_drift_detection:
+                self._drift.record_access(content, category)
+
+            # Check drift
+            if self._config.enable_drift_detection:
+                drift_alerts = self._drift.check_drift(content, category)
+                for alert in drift_alerts:
+                    logger.warning("Drift alert: %s", alert.message)
+
+            # Check provenance trust level
+            trust = TrustLevel.UNVERIFIED
+            if self._config.enable_provenance:
+                trust = self._provenance.get_trust_level(content)
+
+            # Validate with primary strategy
+            result = self._validate_primary(content, trust)
+
+            # Escalate if ambiguous and cloud strategy available
+            if result.verdict == Verdict.AMBIGUOUS and self._cloud_strategy is not None:
+                result = self._validate_cloud(content)
+
+            # Extract doc_id and chunk_index for audit
+            metadata = self._extract_metadata(doc)
+            doc_id = (
+                metadata.get("id")
+                or metadata.get("source")
+                or hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+            )
+            chunk_index = int(metadata.get("chunk_index", 0))
+            score = (score_map or {}).get(id(doc), 0.0)
+
+            # Apply policy
+            if result.verdict == Verdict.CLEAN:
+                self._stats.clean += 1
+                clean_docs.append(doc)
+                retrieved_audit.append(
+                    {
+                        "doc_id": doc_id,
+                        "chunk_index": chunk_index,
+                        "content": content,
+                        "score": score,
+                        "verdict": "clean",
+                        "trust_level": trust.value,
+                    }
+                )
+            elif result.verdict == Verdict.POISONED:
+                self._stats.blocked += 1
+                logger.warning(
+                    "Blocked poisoned memory entry (confidence=%.2f): %s",
+                    result.confidence,
+                    result.explanation,
+                )
+                blocked_audit.append(
+                    {
+                        "content": content,
+                        "verdict": "poisoned",
+                        "confidence": result.confidence,
+                        "attack_type": None,
+                    }
+                )
+            else:
+                # Ambiguous — apply failure policy
+                self._stats.ambiguous += 1
+                if self._config.failure_policy == FailurePolicy.BLOCK:
+                    logger.warning("Blocking ambiguous entry per policy: %s", result.explanation)
+                    blocked_audit.append(
+                        {
+                            "content": content,
+                            "verdict": "ambiguous",
+                            "confidence": result.confidence,
+                            "attack_type": None,
+                        }
+                    )
+                elif self._config.failure_policy == FailurePolicy.ALLOW_WITH_WARNING:
+                    logger.warning("Allowing ambiguous entry with warning: %s", result.explanation)
+                    clean_docs.append(doc)
+                    retrieved_audit.append(
+                        {
+                            "doc_id": doc_id,
+                            "chunk_index": chunk_index,
+                            "content": content,
+                            "score": score,
+                            "verdict": "ambiguous",
+                            "trust_level": trust.value,
+                        }
+                    )
+                elif self._config.failure_policy == FailurePolicy.ALLOW_WITH_REVIEW:
+                    logger.warning("Allowing ambiguous entry for review: %s", result.explanation)
+                    clean_docs.append(doc)
+                    retrieved_audit.append(
+                        {
+                            "doc_id": doc_id,
+                            "chunk_index": chunk_index,
+                            "content": content,
+                            "score": score,
+                            "verdict": "ambiguous",
+                            "trust_level": trust.value,
+                        }
+                    )
+
+        audit_record: AuditRecord | None = None
+        if self._audit_log is not None:
+            audit_record = self._audit_log.write(
+                query=query,
+                user_id=user_id,
+                inference_id=inference_id,
+                retrieved=retrieved_audit,
+                blocked=blocked_audit,
+            )
+
+        return clean_docs, audit_record
 
     def tag_provenance(self, documents: list[Any]) -> None:
         """Tag documents with provenance metadata."""

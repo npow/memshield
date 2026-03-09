@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memshield"
-version = "0.1.0"
+version = "0.2.0"
 description = "Production-grade memory integrity defense for AI agents"
 readme = "README.md"
 license = "Apache-2.0"
@@ -15,14 +15,28 @@ dependencies = []
 openai = ["openai>=1.0"]
 chroma = ["chromadb>=0.5"]
 langchain = ["langchain-core>=0.3"]
+llamaindex = ["llama-index-core>=0.10"]
+pinecone = ["pinecone-client>=3.0"]
+pgvector = ["psycopg2-binary>=2.9", "pgvector>=0.2"]
+qdrant = ["qdrant-client>=1.7"]
+anthropic = ["anthropic>=0.25"]
+audit = ["cryptography>=42.0", "rfc3161ng>=2.1"]
+audit-postgres = ["psycopg2-binary>=2.9"]
+cli = ["click>=8.0"]
+mcp = ["mcp>=1.0"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
+    "cryptography>=42.0",
+    "click>=8.0",
 ]
 all = [
-    "memshield[openai,chroma,langchain,dev]",
+    "memshield[openai,chroma,langchain,llamaindex,pinecone,pgvector,qdrant,anthropic,audit,cli,dev]",
 ]
+
+[project.scripts]
+memshield = "memshield.cli:cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/memshield"]

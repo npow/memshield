@@ -11,6 +11,7 @@ from memshield._types import (
     ValidationStrategy,
     Verdict,
 )
+from memshield.audit import AuditConfig, AuditLog, AuditRecord
 from memshield.strategies import (
     ConsensusStrategy,
     EnsembleStrategy,
@@ -18,6 +19,9 @@ from memshield.strategies import (
 )
 
 __all__ = [
+    "AuditConfig",
+    "AuditLog",
+    "AuditRecord",
     "ConsensusStrategy",
     "DriftAlert",
     "EnsembleStrategy",
@@ -33,7 +37,7 @@ __all__ = [
     "Verdict",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def __getattr__(name: str) -> object:

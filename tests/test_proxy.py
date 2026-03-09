@@ -39,6 +39,7 @@ class TestVectorStoreProxy:
         store.similarity_search.return_value = [doc1, doc2]
 
         shield = MagicMock()
+        shield.audit_log = None  # no audit path
         shield.validate_reads.return_value = [doc1]  # filters out doc2
 
         proxy = VectorStoreProxy(store, shield=shield)
@@ -56,6 +57,7 @@ class TestVectorStoreProxy:
         store.similarity_search_with_score.return_value = [(doc1, 0.9), (doc2, 0.8)]
 
         shield = MagicMock()
+        shield.audit_log = None  # no audit path
         shield.validate_reads.return_value = [doc1]
 
         proxy = VectorStoreProxy(store, shield=shield)
@@ -97,6 +99,7 @@ class TestVectorStoreProxy:
         store = MagicMock()
         store.similarity_search.return_value = []
         shield = MagicMock()
+        shield.audit_log = None  # no audit path
         shield.validate_reads.return_value = []
 
         proxy = VectorStoreProxy(store, shield=shield)

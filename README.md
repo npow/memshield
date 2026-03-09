@@ -5,206 +5,232 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-Stop memory poisoning attacks on your AI agents.
+A drop-in Python library that wraps any vector store to provide two things simultaneously:
 
-## The problem
+- **Memory poisoning defense** — validates every retrieved chunk before it reaches your LLM, blocking injected instructions disguised as knowledge
+- **EU AI Act Article 12 audit logging** — per-inference tamper-evident records of what your AI retrieved, with RFC 3161 timestamps, Ed25519 signatures, and GDPR crypto-shredding
 
-When an attacker poisons your agent's persistent memory — its RAG knowledge base, vector store, or conversation history — every future decision is compromised. Unlike prompt injection, which requires the attacker to be present each session, memory poisoning is a one-time attack with permanent effect. The agent keeps making bad decisions long after the initial compromise, across all users and all sessions.
-
-Existing defenses are either red-teaming tools that find the vulnerability but don't fix it, or academic prototypes tied to specific agent architectures. Nothing you can `pip install` today.
-
-## Quick start
-
-```bash
-pip install memshield
-```
+One line of code. Same interface as your existing store.
 
 ```python
-from memshield import MemShield
-from memshield.adapters.openai_provider import OpenAIProvider
-
-shield = MemShield(local_provider=OpenAIProvider(
-    model="llama3.1:8b",
-    base_url="http://localhost:11434/v1",
-    api_key="not-needed",
-))
-vectorstore = shield.wrap(vectorstore)  # done — reads are validated, writes are tracked
+store = shield.wrap(your_chroma_or_pinecone_store)
+docs = store.similarity_search("what medication is the patient on?")
+# poisoned entries blocked; Article 12 audit record written automatically
 ```
 
-Your agent code doesn't change. The wrapped store has the same interface as the original.
+## Why this exists
+
+**Security:** Memory poisoning corrupts agent behavior permanently. Unlike prompt injection (attacker must be present each session), a poisoned vector store entry affects every future query across all users. Red-teaming tools find the vulnerability — MemShield blocks it at runtime.
+
+**Compliance:** EU AI Act Article 12 (enforceable August 2026) requires high-risk AI systems to automatically generate tamper-evident logs of what data was retrieved at inference time, retained for at least 6 months. No RAG framework produces this natively.
+
+Both problems share the same interception point: the retrieval layer.
 
 ## Install
 
 ```bash
-# Core library (no dependencies)
-pip install memshield
-
-# With OpenAI/Ollama provider
-pip install memshield[openai]
-
-# With all optional integrations
-pip install memshield[all]
-
-# From source
-git clone https://github.com/npow/memshield.git
-cd memshield
-pip install -e ".[dev]"
+pip install memshield                  # core (no deps)
+pip install memshield[openai]          # OpenAI/Ollama provider
+pip install memshield[audit]           # Article 12 audit log (requires cryptography + rfc3161ng)
+pip install memshield[audit,openai]    # both
+pip install memshield[all]             # everything
 ```
 
-## Usage
+## Quick start
 
-### Validate memory reads with a local LLM
+### Poisoning defense only
 
 ```python
-from memshield import MemShield, ShieldConfig
+from memshield import MemShield
+from memshield.strategies import KeywordHeuristicStrategy, ConsensusStrategy, EnsembleStrategy
 from memshield.adapters.openai_provider import OpenAIProvider
 
-provider = OpenAIProvider(model="llama3.1:8b", base_url="http://localhost:11434/v1")
-shield = MemShield(local_provider=provider)
+shield = MemShield(
+    strategy=EnsembleStrategy([
+        KeywordHeuristicStrategy(),
+        ConsensusStrategy(OpenAIProvider(model="gpt-4o-mini")),
+    ])
+)
 
 store = shield.wrap(your_vectorstore)
-results = store.similarity_search("company refund policy")
-# Poisoned entries are blocked. Clean entries pass through.
+docs = store.similarity_search("company refund policy")
+# poisoned entries are blocked; clean entries pass through unchanged
 ```
 
-### Add cloud escalation for ambiguous cases
+### With Article 12 audit logging
 
 ```python
-local = OpenAIProvider(model="llama3.1:8b", base_url="http://localhost:11434/v1")
-cloud = OpenAIProvider(model="gpt-4o")  # only called for ambiguous entries
+from memshield import MemShield, AuditConfig
+from memshield.strategies import EnsembleStrategy, KeywordHeuristicStrategy, ConsensusStrategy
+from memshield.adapters.openai_provider import OpenAIProvider
 
-shield = MemShield(local_provider=local, cloud_provider=cloud)
+shield = MemShield(
+    strategy=EnsembleStrategy([
+        KeywordHeuristicStrategy(),
+        ConsensusStrategy(OpenAIProvider()),
+    ]),
+    audit=AuditConfig(
+        store="./audit.db",
+        knowledge_base_id="kb_prod_v3",
+        pii_fields=["query", "content"],  # AES-256-GCM encrypted at rest
+        key_store="./keys.db",
+        tsa_url="https://timestamp.sectigo.com",  # RFC 3161, free, no account needed
+    ),
+)
+
 store = shield.wrap(your_vectorstore)
+docs = store.similarity_search(
+    "what medication is the patient on?",
+    user_id="u_123",
+    inference_id="req_xyz",  # optional — correlate with your own request logs
+)
+
+record = shield.audit_log.last_record()
+print(record.inference_id)       # req_xyz
+print(record.chain_hash)         # sha256:8b3e...
+print(record.timestamp_rfc3161)  # base64-encoded TSA proof from Sectigo
 ```
 
-### Track provenance of memory writes
+### GDPR right-to-erasure
 
 ```python
-shield = MemShield(local_provider=provider)
-store = shield.wrap(your_vectorstore)
-
-# Writes are automatically tagged with source, timestamp, and hash chain
-store.add_texts(["New company policy: ..."], metadatas=[{"source": "user_input"}])
-
-# Later, verify the provenance chain is intact
-assert shield.provenance.verify_chain()
+# Deletes the user's encryption key. Ciphertext becomes permanently unreadable.
+# Chain hashes, timestamps, and doc IDs remain intact for audit continuity.
+shield.audit_log.erase_user(user_id="u_123")
 ```
 
-### Check operational stats
+## Audit log schema
+
+Every inference produces one record, aligned to ISO/IEC DIS 24970:2025:
+
+```json
+{
+  "inference_id": "req_xyz",
+  "timestamp_iso": "2026-03-10T09:00:00.000Z",
+  "timestamp_rfc3161": "<base64 DER token from Sectigo TSA>",
+  "key_id": "<sha256 fingerprint of Ed25519 signing key>",
+  "user_id": "u_123",
+  "query_hash": "sha256:a3f8...",
+  "query_encrypted": "<aes-256-gcm ciphertext>",
+  "knowledge_base_id": "kb_prod_v3",
+  "retrieved": [
+    {
+      "doc_id": "doc_456", "chunk_index": 3,
+      "content_hash": "sha256:c9d2...", "content_encrypted": "<aes-256-gcm ciphertext>",
+      "score": 0.94, "verdict": "clean", "trust_level": "verified"
+    }
+  ],
+  "blocked": [
+    {
+      "content_hash": "sha256:f1a9...", "content_encrypted": "<aes-256-gcm ciphertext>",
+      "verdict": "poisoned", "confidence": 0.97, "attack_type": "T1_instruction_override"
+    }
+  ],
+  "chain_hash": "sha256:8b3e...",
+  "previous_chain_hash": "sha256:2d7a...",
+  "signature": "ed25519:...",
+  "iso24970_event_type": "retrieval",
+  "iso24970_schema_version": "DIS-2025"
+}
+```
+
+**Tamper evidence:** append-only SQLite (WAL mode), SHA-256 hash chain, Ed25519 signature per record, RFC 3161 timestamp token. Expired records (default 180-day retention) are replaced with tombstones that preserve chain continuity.
+
+## CLI
+
+```bash
+memshield audit verify   --db ./audit.db
+memshield audit export   --db ./audit.db --from 2026-01-01 --format jsonl
+memshield audit inspect  --db ./audit.db --inference-id req_xyz
+memshield audit erase-user --db ./audit.db --key-store ./keys.db \
+    --user-id u_123 --knowledge-base-id kb_prod_v3
+memshield keys rotate --key-file ./memshield.key
+```
+
+## MCP server
+
+Any MCP-compatible agent (Claude Code, Cursor) can use MemShield with one config entry:
+
+```json
+{
+  "mcpServers": {
+    "memshield": {
+      "command": "memshield",
+      "args": ["mcp", "--audit-db", "./audit.db"]
+    }
+  }
+}
+```
+
+Tools exposed: `audit_inspect(inference_id)`, `audit_verify()`, `audit_export(from_date?)`.
+
+## Supported vector stores
+
+| Store | How to use |
+|-------|-----------|
+| Chroma | `shield.wrap(chroma_collection)` |
+| LangChain vectorstores | `shield.wrap(langchain_vectorstore)` |
+| LlamaIndex retrievers | `LlamaIndexRetrieverAdapter(retriever)` then `shield.wrap(...)` |
+| Pinecone | `PineconeStoreAdapter(index, embed_fn)` then `shield.wrap(...)` |
+| pgvector | `PgVectorStoreAdapter(conn, embed_fn)` then `shield.wrap(...)` |
+| Qdrant | `QdrantStoreAdapter(client, collection, embed_fn)` then `shield.wrap(...)` |
+
+## Validation strategies
 
 ```python
-print(f"Clean: {shield.stats.clean}")
-print(f"Blocked: {shield.stats.blocked}")
-print(f"Escalated to cloud: {shield.stats.cloud_calls}")
+from memshield.strategies import KeywordHeuristicStrategy, ConsensusStrategy, EnsembleStrategy
+
+# Instant, zero-cost — catches obvious injection patterns
+KeywordHeuristicStrategy()
+
+# LLM-based consensus (A-MemGuard approach) — catches subtle attacks
+ConsensusStrategy(OpenAIProvider(model="gpt-4o-mini"))
+
+# Ensemble — flag if either detects poisoning (maximum recall)
+EnsembleStrategy([KeywordHeuristicStrategy(), ConsensusStrategy(provider)], mode="any_poisoned")
+
+# Ensemble — majority vote (balanced precision/recall)
+EnsembleStrategy([KeywordHeuristicStrategy(), ConsensusStrategy(provider)], mode="majority")
 ```
 
-## How it works
+## Benchmark
 
-MemShield wraps your vector store with a proxy. When your agent calls `similarity_search`, the proxy intercepts the results and validates each entry before returning them. Writes go through too — tagged with provenance metadata.
+[memshield-bench](https://huggingface.co/datasets/npow/memshield-bench) — 1,178 labeled entries across 10 attack types, including AgentPoison (NeurIPS 2024) data:
 
-**The core idea is simple: ask an LLM to analyze each retrieved memory entry.** Specifically, the LLM decomposes the entry into three parts — what factual claim it makes, what action it implies, and what context would make it legitimate. When these conflict (e.g., the factual claim is benign but the implied action is "override system instructions"), the entry is flagged as poisoned. This catches attacks that look like knowledge but behave like instructions.
+| Strategy | Precision | Recall | F1 |
+|----------|-----------|--------|----|
+| Keyword heuristic | 100% | 14.5% | 25.4% |
+| LLM consensus | 97.1% | 98.6% | 97.8% |
+| Ensemble (majority) | 100% | 100% | 100% |
+| Ensemble (any\_poisoned) | 94.5% | **100%** | 97.2% |
 
-Three layers, from fast/cheap to slow/expensive:
-
-1. **Local LLM** (every read) — A local model (Llama 3.1 8B via Ollama/vLLM) runs the analysis. Adds ~200-500ms per entry on GPU. Resolves the clear cases — obviously clean or obviously poisoned.
-2. **Cloud LLM** (ambiguous cases only) — When the local model isn't confident, the entry escalates to a frontier model (GPT-4o, Claude, etc.) for a second pass. Typically 1-3% of reads.
-3. **Provenance + drift** (metadata, no LLM) — Every write is logged in a SHA-256 hash chain with source and trust level. A statistical profiler flags unusual access patterns — catching subtle poisoning that content analysis misses.
-
-The proxy delegates all methods it doesn't intercept via `__getattr__`, so your agent code doesn't change.
-
-## Alternatives and prior work
-
-There are 60+ products in the LLM guardrails space. Almost all operate at the **prompt/response boundary** — they screen what goes into and comes out of the model. Very few operate at the **memory/retrieval layer** where poisoning actually lives.
-
-### Products that touch RAG/memory content
-
-These are the closest to what memshield does:
-
-| Tool | What it does | How memshield differs |
-|------|-------------|----------------------|
-| [NVIDIA NeMo Guardrails](https://github.com/NVIDIA/NeMo-Guardrails) | Open-source programmable guardrails with "retrieval rails" that filter RAG chunks before they reach the LLM. | NeMo filters based on configurable rules (Colang). memshield uses LLM reasoning to detect semantic manipulation — entries that follow the rules but contain disguised instructions. NeMo is broader (dialog rails, output rails); memshield is deeper on memory specifically. |
-| [Daxa AI](https://www.daxa.ai) | Shift-left RAG security: scans content before vectorization, labels malicious vectors, policy-based retrieval controls. | Daxa scans at ingestion time (pre-vectorization). memshield validates at retrieval time (post-vectorization). Different interception points — Daxa prevents bad data from entering; memshield catches it on the way out. Complementary. |
-| [Preamble](https://www.preamble.com) | Runtime guardrails explicitly built for RAG, LLMs, and agents. | Preamble is a commercial platform. memshield is open-source middleware you embed in your code. Different deployment models. |
-| [NeuralTrust](https://www.neuraltrust.ai) | Generative Application Firewall that maintains context across sessions and detects accumulation attacks. | NeuralTrust is a full commercial firewall platform. memshield is a pip-installable library that wraps your vector store. Different scale and scope. |
-| [Meta LlamaFirewall](https://github.com/meta-llama/PurpleLlama/tree/main/LlamaFirewall) | Open-source guardrails with AlignmentCheck that audits agent reasoning from untrusted data sources. | LlamaFirewall audits the agent's chain-of-thought after retrieval. memshield validates the memory entries themselves before they reach the agent. Different layer — LlamaFirewall trusts the data and checks the reasoning; memshield checks the data. |
-
-### Prompt/response guardrails (don't address memory)
-
-The bulk of the market. These screen model I/O but don't inspect what's stored in your knowledge base:
-
-| Tool | Status |
-|------|--------|
-| [Lakera Guard](https://www.lakera.ai) | Acquired by Check Point. Prompt injection detection API. |
-| [Guardrails AI](https://www.guardrailsai.com) | Open-source I/O validators. No memory-specific validators. |
-| [LLM Guard](https://github.com/protectai/llm-guard) (Protect AI → Palo Alto) | Open-source input/output scanners. |
-| [Arthur AI Shield](https://www.arthur.ai) | LLM firewall for PII, toxicity, hallucination, injection. |
-| [Prompt Security](https://www.prompt.security) | Acquired by SentinelOne. Shadow AI + injection defense. |
-| [CalypsoAI](https://calypsoai.com) | Acquired by F5. Inference-time security. |
-| [DynamoGuard](https://dynamo.ai) (Dynamo AI) | Real-time guardrails with sub-50ms latency. |
-
-### Cloud provider guardrails
-
-| Provider | Feature | Handles memory? |
-|----------|---------|----------------|
-| AWS Bedrock | Guardrails with contextual grounding checks | Partial — checks responses against source docs, doesn't scan the knowledge base itself |
-| Google Vertex AI | Model Armor for injection/jailbreak/content safety | No — prompt/response only |
-| Azure AI | Content Safety + AI Threat Protection | Partial — anomaly monitoring, not knowledge base scanning |
-| Cisco AI Defense | Built on Robust Intelligence acquisition | Prompt/response screening |
-| Palo Alto Prisma AIRS | Built on Protect AI acquisition | Prompt/response + model scanning |
-
-### AI security platforms (broader scope)
-
-Funded companies focused on AI security posture, not specifically memory defense:
-
-[Noma Security](https://noma.security) ($132M raised) · [HiddenLayer](https://hiddenlayer.com) (model-level attacks) · [Lasso Security](https://lasso.security) ($28M, MCP gateway) · [Straiker](https://straiker.ai) ($21M, agentic AI) · [WitnessAI](https://witnessai.com) ($58M, AI governance) · [Cranium AI](https://cranium.ai) ($32M, governance) · [Zenity](https://zenity.io) (agent behavior monitoring)
-
-### Research (no commercial product)
-
-| Paper | What it proved |
-|-------|---------------|
-| [A-MemGuard](https://arxiv.org/abs/2510.02373) (NTU/Oxford, 2025) | Consensus validation reduces memory poisoning attack success by >95%. memshield adapts this approach. |
-| [RAGuard](https://openreview.net/forum?id=onh7sLJ1kl) (NeurIPS 2025) | Adversarial retriever training + zero-knowledge filter blocks RAG corpus poisoning. |
-| [RAGPart & RAGMask](https://arxiv.org/abs/2601.05504) (U. Maryland, 2026) | Fragment-and-vote and masking approaches reduce poison impact. |
-| [TrustRAG](https://arxiv.org/abs/2501.00000) (2025) | K-means clustering detects poisoned embeddings. |
-| [MemoryGraft](https://arxiv.org/abs/2512.16962) (2025) | Attack paper proposing Cryptographic Provenance Attestation (unbuilt). memshield implements provenance tracking. |
-
-### Where memshield fits
-
-memshield is **open-source middleware** that wraps your vector store. It's not a platform, not a firewall, not a governance tool. It's a library you `pip install` and add to your agent in three lines.
-
-It complements the products above:
-- Use **Promptfoo** to test if you're vulnerable → use **memshield** to fix it at runtime
-- Use **NeMo Guardrails** for broad dialog/output rails → use **memshield** for deep memory content analysis
-- Use **Lakera/LLM Guard** for prompt injection on user inputs → use **memshield** for poisoning in stored knowledge
-- Use **Daxa** to prevent bad data from entering your vector store → use **memshield** to catch what Daxa missed on the way out
-
-**Honest caveats:**
-- NVIDIA NeMo Guardrails already has retrieval rails. If you're in the NeMo ecosystem, check if that's sufficient before adding memshield.
-- Platform vendors (Meta, Microsoft, AWS, Google) may add native memory integrity features within 6-12 months.
-- This is a new tool with no production deployments yet. The benchmark results will tell us how well it actually works.
+Keyword heuristic catches 0% of AgentPoison attacks — sophisticated attacks are disguised as reasoning traces with no obvious instruction patterns. LLM consensus is required.
 
 ## Configuration
 
 ```python
-from memshield import MemShield, ShieldConfig, FailurePolicy
+from memshield import ShieldConfig, FailurePolicy
 
 config = ShieldConfig(
-    confidence_threshold=0.7,        # min confidence to resolve locally
-    untrusted_confidence_boost=0.15, # extra confidence required for untrusted sources
-    failure_policy=FailurePolicy.ALLOW_WITH_WARNING,  # what to do with ambiguous entries
+    confidence_threshold=0.7,
+    failure_policy=FailurePolicy.BLOCK,  # or ALLOW_WITH_WARNING, ALLOW_WITH_REVIEW
     enable_provenance=True,
     enable_drift_detection=True,
 )
-shield = MemShield(local_provider=provider, config=config)
+shield = MemShield(strategy=..., config=config)
 ```
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `confidence_threshold` | 0.7 | Minimum confidence to resolve an entry locally |
-| `untrusted_confidence_boost` | 0.15 | Extra confidence required for entries from untrusted sources |
-| `failure_policy` | `ALLOW_WITH_WARNING` | `BLOCK`, `ALLOW_WITH_WARNING`, or `ALLOW_WITH_REVIEW` |
-| `enable_provenance` | `True` | Track cryptographic provenance of memory writes |
-| `enable_drift_detection` | `True` | Monitor for unusual memory access patterns |
+## What MemShield is not
+
+- **Not a full EU AI Act compliance solution.** Article 12 logging covers what was retrieved. It does not produce Annex IV technical documentation or Article 9 risk management plans. For complete Article 12 coverage pair with an LLM observability tool (Langfuse, Helicone).
+- **Not a managed service.** Self-hosted only.
+- **Not a TypeScript library.** Python only.
+
+## Alternatives
+
+Most AI security products operate at the prompt/response boundary. MemShield operates at the retrieval layer — where poisoning actually happens.
+
+Closest alternatives: [NVIDIA NeMo Guardrails](https://github.com/NVIDIA/NeMo-Guardrails) (retrieval rails, broader scope), [Daxa](https://www.daxa.ai) (pre-vectorization scanning, complementary).
 
 ## Development
 
@@ -212,76 +238,8 @@ shield = MemShield(local_provider=provider, config=config)
 git clone https://github.com/npow/memshield.git
 cd memshield
 pip install -e ".[dev]"
-pytest -v
+pytest
 ```
-
-### Pluggable strategies
-
-memshield ships with multiple validation strategies you can use individually or ensemble:
-
-```python
-from memshield import (
-    MemShield, ConsensusStrategy, KeywordHeuristicStrategy, EnsembleStrategy
-)
-from memshield.adapters.openai_provider import OpenAIProvider
-
-# Fast keyword heuristic (instant, zero cost, catches obvious attacks)
-shield = MemShield(strategy=KeywordHeuristicStrategy())
-
-# LLM consensus — A-MemGuard approach (deep, catches subtle attacks)
-provider = OpenAIProvider(model="llama3.1:8b", base_url="http://localhost:11434/v1")
-shield = MemShield(strategy=ConsensusStrategy(provider))
-
-# Ensemble — run both, flag as poisoned if either detects it
-shield = MemShield(strategy=EnsembleStrategy(
-    [KeywordHeuristicStrategy(), ConsensusStrategy(provider)],
-    mode="any_poisoned",  # or "majority" for balanced precision/recall
-))
-```
-
-### Run benchmarks
-
-The benchmark compares strategies against labeled datasets including reconstructed [AgentPoison](https://github.com/AI-secure/AgentPoison) (NeurIPS 2024) attack data — the same corpus A-MemGuard evaluated against.
-
-```bash
-# Heuristic baseline (instant, no LLM needed):
-python benchmarks/run_benchmark.py --strategy heuristic --tier 2 3 4
-
-# Compare all strategies head-to-head:
-python benchmarks/run_benchmark.py --compare-strategies --tier 2 3 4 \
-    --local-url http://localhost:11434/v1 --local-model llama3.1:8b \
-    --cloud-model gpt-4o
-
-# Via claude-relay:
-python benchmarks/run_benchmark.py --compare-strategies --tier 2 3 4 \
-    --local-url http://localhost:8082/v1 --local-model sonnet
-```
-
-Benchmark tiers:
-
-| Tier | Source | Entries | What it tests |
-|------|--------|---------|---------------|
-| 2 | Hand-crafted + MemoryGraft-style | 55 | Memory-specific: experience records, schema spoofing, rubric mimicry |
-| 3 | Adversarial paired entries | 18 | Subtle pairs where clean and poisoned look structurally identical |
-| 4 | AgentPoison (NeurIPS 2024) | 330 | Reconstructed StrategyQA + EHR poisoned passages with published golden triggers |
-
-### Results (403 entries, tiers 2+3+4)
-
-Tested using Claude Haiku via [claude-relay](https://github.com/npow/claude-relay):
-
-| Strategy | Precision | Recall | F1 | FPR | Latency |
-|----------|-----------|--------|----|-----|---------|
-| Keyword heuristic | 100% | 14.5% | 25.4% | 0% | <1ms |
-| LLM consensus | 97.1% | 98.6% | 97.8% | 0.6% | ~9s |
-| Ensemble (majority) | 100% | 100%* | 100%* | 0% | ~8s |
-| Ensemble (any_poisoned) | 94.5% | **100%** | 97.2% | 1.2% | ~6s |
-
-*\*Majority mode pushes 57 entries to ambiguous when heuristic and LLM disagree.*
-
-Key findings:
-- **Keyword heuristic catches 0% of AgentPoison attacks.** The poisoned passages contain no obvious instruction patterns — they're disguised as reasoning traces.
-- **LLM consensus catches 98.6% of all poisoned entries** with only 2 false positives out of 334 clean entries. This validates A-MemGuard's published claim (>95% reduction) on the same attack data.
-- **Ensemble (any_poisoned) achieves 100% recall** — every poisoned entry detected — at the cost of 4 false positives (1.2% FPR).
 
 ## License
 
